@@ -90,9 +90,34 @@ def make_handler(data_dir, store):
 
         def _check_origin(self):
             origin = self.headers.get("Origin")
-            if origin:
-                parsed = urlsplit(origin)
-                if parsed.scheme not in {"http", "https"} or parsed.netloc.lower() != self.headers.get("Host", "").lower():
+            if origin is not None:
+                try:
+                    parsed = urlsplit(origin)
+                    # Valid Origin values contain only scheme + authority. Reject
+                    # malformed URL forms rather than comparing a parsed prefix.
+                    origin_host = parsed.hostname
+                    _ = parsed.port  # Forces validation of bracketed IPv6/port syntax.
+                except ValueError:
+                    self._json(403, {"error": "Untrusted request origin."})
+                    return False
+                if (parsed.scheme not in {"http", "https"} or not parsed.netloc or not origin_host
+                        or parsed.path or parsed.query or parsed.fragment or parsed.username is not None
+                        or parsed.password is not None or any(ch in origin for ch in (",", "\\", "%"))
+                        or any(ch.isspace() or ord(ch) < 33 for ch in origin)):
+                    self._json(403, {"error": "Untrusted request origin."})
+                    return False
+                allowed_hosts = {self.headers.get("Host", "").lower()}
+                forwarded_host = self.headers.get("X-Forwarded-Host", "").lower()
+                forwarded_proto = self.headers.get("X-Forwarded-Proto")
+                # Only trust a single, syntactically valid proxy authority. If
+                # the proxy declares its public scheme, it must match Origin too.
+                if forwarded_host and not any(ch in forwarded_host for ch in (",", "/", "\\", "@", "%", "?", "#")) and not any(ch.isspace() for ch in forwarded_host):
+                    if forwarded_proto is None or forwarded_proto.lower() == parsed.scheme:
+                        allowed_hosts.add(forwarded_host)
+                if forwarded_proto is not None and forwarded_proto.lower() not in {"http", "https"}:
+                    self._json(403, {"error": "Untrusted request origin."})
+                    return False
+                if parsed.netloc.lower() not in allowed_hosts:
                     self._json(403, {"error": "Untrusted request origin."})
                     return False
             return True

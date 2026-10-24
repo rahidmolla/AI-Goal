@@ -181,4 +181,6 @@ input.addEventListener('input', () => { count.textContent = `${input.value.lengt
 input.addEventListener('keydown', event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) submitTask(); });
 planButton.addEventListener('click', submitTask);
 document.querySelector('#refresh-button').addEventListener('click', loadHistory);
+const warning = document.querySelector('#public-warning');
+if (warning && window.location.hostname.endsWith('.agent37.app')) warning.hidden = false;
 loadHistory();

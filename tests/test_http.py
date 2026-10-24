@@ -32,6 +32,16 @@ class HttpTests(unittest.TestCase):
         with urlopen(req) as response:
             return response.status, json.loads(response.read())
 
+    def test_public_warning_markup_is_not_forced_on_localhost(self):
+        with urlopen(self.base + "/") as response:
+            page = response.read().decode()
+        self.assertIn('id="public-warning" hidden', page)
+
+    def test_static_client_shows_public_warning_for_agent37_domains(self):
+        with urlopen(self.base + "/static/app.js") as response:
+            script = response.read().decode()
+        self.assertIn("window.location.hostname.endsWith('.agent37.app')", script)
+
     def test_health_and_create_approval_flow(self):
         status, health = self.request("/api/health")
         self.assertEqual(status, 200)
@@ -58,6 +68,56 @@ class HttpTests(unittest.TestCase):
         with self.assertRaises(HTTPError) as ctx:
             urlopen(req)
         self.assertEqual(ctx.exception.code, 403)
+
+    def test_allows_same_origin_post_through_agent37_reverse_proxy(self):
+        body = json.dumps({"request": "Read file missing.txt"}).encode()
+        req = Request(self.base + "/api/tasks", data=body, method="POST", headers={"Content-Type": "application/json", "Origin": "https://taskpilot.example", "X-Forwarded-Host": "taskpilot.example", "X-Forwarded-Proto": "https"})
+        with urlopen(req) as response:
+            self.assertEqual(response.status, 200)
+            payload = json.loads(response.read())
+        self.assertEqual(payload["status"], "failed")
+
+    def test_rejects_malformed_origin_even_when_hostname_matches_proxy_host(self):
+        for origin in ("https://taskpilot.example/path", "https://taskpilot.example?query", "https://user@taskpilot.example", "null", "https://taskpilot%2eexample", "https://taskpilot.example:99999"):
+            with self.subTest(origin=origin):
+                body = json.dumps({"request": "Read file missing.txt"}).encode()
+                req = Request(self.base + "/api/tasks", data=body, method="POST", headers={"Content-Type": "application/json", "Origin": origin, "X-Forwarded-Host": "taskpilot.example", "X-Forwarded-Proto": "https"})
+                with self.assertRaises(HTTPError) as ctx:
+                    urlopen(req)
+                self.assertEqual(ctx.exception.code, 403)
+
+    def test_rejects_bad_proxy_host_or_mismatched_proxy_scheme(self):
+        cases = [("taskpilot.example,evil.example", "https"), ("taskpilot.example/path", "https"), ("taskpilot.example:443", "https"), ("https://taskpilot.example", "https"), ("taskpilot.example", "http"), ("taskpilot.example", "https,http")]
+        for host, proto in cases:
+            with self.subTest(host=host, proto=proto):
+                body = json.dumps({"request": "Read file missing.txt"}).encode()
+                req = Request(self.base + "/api/tasks", data=body, method="POST", headers={"Content-Type": "application/json", "Origin": "https://taskpilot.example", "X-Forwarded-Host": host, "X-Forwarded-Proto": proto})
+                with self.assertRaises(HTTPError) as ctx:
+                    urlopen(req)
+                self.assertEqual(ctx.exception.code, 403)
+
+    def test_approved_same_origin_creation_runs_through_proxy_headers(self):
+        workspace = self.root / "workspace"
+        workspace.mkdir(exist_ok=True)
+        (workspace / "a.txt").write_text("before")
+        _, pending = self.request("/api/tasks", "POST", {"request": "Create file a.txt with content: after"})
+        request = Request(self.base + f"/api/tasks/{pending['id']}/approve", data=json.dumps({"approve": True}).encode(), method="POST", headers={"Content-Type": "application/json", "Origin": "https://taskpilot.example", "X-Forwarded-Host": "taskpilot.example", "X-Forwarded-Proto": "https"})
+        with urlopen(request) as response:
+            result = json.loads(response.read())
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual((workspace / "a.txt").read_text(), "after")
+
+    def test_untrusted_proxy_origin_cannot_approve_pending_action(self):
+        workspace = self.root / "workspace"
+        workspace.mkdir(exist_ok=True)
+        target = workspace / "a.txt"
+        target.write_text("before")
+        _, pending = self.request("/api/tasks", "POST", {"request": "Create file a.txt with content: after"})
+        request = Request(self.base + f"/api/tasks/{pending['id']}/approve", data=json.dumps({"approve": True}).encode(), method="POST", headers={"Content-Type": "application/json", "Origin": "https://evil.example", "X-Forwarded-Host": "taskpilot.example", "X-Forwarded-Proto": "https"})
+        with self.assertRaises(HTTPError) as ctx:
+            urlopen(request)
+        self.assertEqual(ctx.exception.code, 403)
+        self.assertEqual(target.read_text(), "before")
 
     def test_approval_cannot_turn_a_stale_overwrite_into_create(self):
         workspace = self.root / "workspace"
