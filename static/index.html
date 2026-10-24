@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f5f4f0">
+  <title>TaskPilot — Work, with proof.</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="TaskPilot home"><span class="logo-mark">T<span></span></span><span>taskpilot<span class="brand-dot">.</span></span></a>
+    <div class="top-note"><span class="pulse"></span> RESTRICTED WORKSPACE <span class="divider">/</span> NOTHING LEAVES THIS BOX</div>
+    <a class="github-pill" href="#how-it-works">How it works <span aria-hidden="true">↗</span></a>
+  </header>
+  <main>
+    <section class="hero">
+      <div class="hero-copy">
+        <div class="eyebrow"><span class="eyebrow-line"></span> A LITTLE MORE FOLLOW-THROUGH</div>
+        <h1>Work, with<br><span class="accent-word">proof.</span><span class="sunburst" aria-hidden="true">✳</span></h1>
+        <p class="hero-intro">Tell TaskPilot what you need done. It’ll make a plan, ask before anything risky, and show what actually happened.</p>
+        <div class="trust-row"><span class="trust-icon">↳</span> Your files stay in a sandbox. Your secrets stay yours.</div>
+      </div>
+      <div class="task-card">
+        <div class="card-heading"><div><div class="card-kicker">YOUR NEXT SMALL WIN</div><h2>What can I take off your plate?</h2></div><span class="sparkle" aria-hidden="true">✳</span></div>
+        <p class="scope-note">Runs on files inside TaskPilot’s own workspace only. Not for passwords or other sensitive content.</p>
+        <label class="sr-only" for="task-input">Describe your file task</label>
+        <textarea id="task-input" maxlength="12000" placeholder="Try: Create file notes/today.txt with content: Call Sam at 3pm" rows="3"></textarea>
+        <div class="input-meta"><span>For now, I’m great with local file tasks.</span><span id="char-count">0 / 12,000</span></div>
+        <div class="card-actions"><span class="format-hint"><span class="keycap">↵</span> I’ll show you the plan first</span><button id="plan-button" class="primary-button" type="button">Make a plan <span aria-hidden="true">→</span></button></div>
+        <div id="message" class="message" role="status" aria-live="polite" hidden></div>
+      </div>
+    </section>
+
+    <section id="result" class="result-section" aria-live="polite" hidden>
+      <div class="section-heading"><div><span class="section-overline">THE GAME PLAN</span><h2>Here’s what I understood.</h2></div><span id="status-badge" class="status-badge"></span></div>
+      <div id="plan-card" class="plan-card"></div>
+      <div id="report" class="report-card" hidden></div>
+    </section>
+
+    <section class="history-section">
+      <div class="section-heading"><div><span class="section-overline">YOUR RECENT WINS</span><h2>A little paper trail.</h2></div><button id="refresh-button" class="text-button" type="button">Refresh history <span aria-hidden="true">↻</span></button></div>
+      <div id="history-list" class="history-list"><div class="empty-state"><span>✳</span><p>No tasks yet. That’s a nice clean slate.</p></div></div>
+    </section>
+
+    <section id="how-it-works" class="principles">
+      <div class="principle"><span class="principle-number">01</span><div><h3>Plan before action.</h3><p>See a clear plan, before anything happens.</p></div></div>
+      <div class="principle"><span class="principle-number">02</span><div><h3>Ask before risky.</h3><p>Overwrites and deletions wait for your OK.</p></div></div>
+      <div class="principle"><span class="principle-number">03</span><div><h3>Show, don’t tell.</h3><p>Completion comes with a check against the real result.</p></div></div>
+    </section>
+  </main>
+  <footer class="footer"><span class="brand footer-brand"><span class="logo-mark">T<span></span></span><span>taskpilot<span class="brand-dot">.</span></span></span><span>Small tasks. Thoughtfully done. <span class="footer-star">✳</span></span><span class="footer-local">MADE FOR THE LOCAL WORKSPACE</span></footer>
+</body>
+</html>
