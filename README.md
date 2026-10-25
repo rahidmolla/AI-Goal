@@ -6,7 +6,7 @@
 
 > **Deployment note:** The public preview was verified to serve the pre-authentication application during this preparation. The owner-auth change is included in this repository, but deployment credentials/restart are not confirmed; do not enter private data into the preview until the owner login is visible and configured.
 
-GoalForge closes the loop between intention and verified outcome. It executes permitted work, observes actual results, recovers safely from failures, and retains evidence-backed lessons for future runs.
+AI  closes the loop between intention and verified outcome. It executes permitted work, observes actual results, recovers safely from failures, and retains evidence-backed lessons for future runs.
 
 ## Problem and solution
 
