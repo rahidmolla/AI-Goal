@@ -1,6 +1,29 @@
+# Python
 __pycache__/
 *.py[cod]
+.venv/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Runtime data, databases, logs, caches, generated artifacts
 data/*
 !data/.gitkeep
-.venv/
-.env
+*.sqlite
+*.sqlite3
+*.db
+*.log
+.coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+
+# Agent37/local instance hooks may contain deployment details; keep out of this project repo.
+.agent37/

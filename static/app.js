@@ -1,186 +1,24 @@
-const input = document.querySelector('#task-input');
-const count = document.querySelector('#char-count');
-const planButton = document.querySelector('#plan-button');
-const message = document.querySelector('#message');
-const resultSection = document.querySelector('#result');
-const planCard = document.querySelector('#plan-card');
-const report = document.querySelector('#report');
-const badge = document.querySelector('#status-badge');
-const historyList = document.querySelector('#history-list');
-let currentTask = null;
-
-const labels = {
-  completed: 'Verified complete',
-  failed: 'Failed',
-  unverified: 'Unverified',
-  approval_required: 'Needs approval',
-  planned: 'Planned',
-  ready: 'Ready to run',
-  invalid: 'Can’t plan this yet'
-};
-
-async function api(path, options = {}) {
-  const response = await fetch(path, {
-    ...options,
-    headers: { ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...(options.headers || {}) }
-  });
-  let body;
-  try { body = await response.json(); } catch { throw new Error(`The server returned an unreadable response (${response.status}).`); }
-  if (!response.ok && response.status !== 202 && response.status !== 422) {
-    throw new Error(body.error || `Request failed (${response.status}).`);
-  }
-  return body;
-}
-
-function setMessage(text = '', isError = false) {
-  message.textContent = text;
-  message.classList.toggle('error', isError);
-  message.hidden = !text;
-}
-
-function statusLabel(status) { return labels[status] || status.replaceAll('_', ' '); }
-function make(tag, className, text) {
-  const el = document.createElement(tag);
-  if (className) el.className = className;
-  if (text !== undefined) el.textContent = text;
-  return el;
-}
-
-function renderPlan(task, pending = false) {
-  currentTask = task;
-  resultSection.hidden = false;
-  planCard.replaceChildren();
-  report.hidden = true;
-  report.replaceChildren();
-  const status = task.status || task.plan?.status || 'planned';
-  badge.textContent = statusLabel(status);
-  const title = make('strong', '', task.plan?.summary || task.summary || 'Task plan');
-  planCard.append(title);
-  const intro = make('p', '', task.plan?.status === 'invalid'
-    ? 'No action was taken. Try one of the supported file task formats below.'
-    : 'One small, explicit file action. Here’s the plan before I do it.');
-  planCard.append(intro);
-  const actions = task.plan?.actions || [];
-  if (actions.length) {
-    const list = make('ol');
-    for (const action of actions) {
-      let description = action.operation === 'create_file' ? `Create ${action.path}` : action.operation === 'read_file' ? `Read ${action.path}` : `Delete ${action.path}`;
-      if (action.operation === 'create_file') description += ` (${new TextEncoder().encode(action.content).length} bytes of text)`;
-      list.append(make('li', '', description));
-    }
-    planCard.append(list);
-  }
-  if (pending && task.id) {
-    const approval = make('div', 'approval-box');
-    const copy = make('span', 'approval-copy', 'This overwrites an existing file or removes one. Only continue if that’s what you want.');
-    const button = make('button', 'primary-button approval-button', 'Approve & execute');
-    button.type = 'button';
-    button.addEventListener('click', async () => {
-      button.disabled = true;
-      button.textContent = 'Working…';
-      try {
-        const updated = await api(`/api/tasks/${encodeURIComponent(task.id)}/approve`, { method: 'POST', body: JSON.stringify({ approve: true }) });
-        renderPlan(updated);
-        renderReport(updated);
-        await loadHistory();
-      } catch (error) {
-        setMessage(error.message, true);
-        button.disabled = false;
-        button.textContent = 'Approve & execute';
-      }
-    });
-    approval.append(copy, button);
-    planCard.append(approval);
-  }
-  if (status === 'invalid') {
-    planCard.append(make('p', '', 'Supported: “Create file PATH with content: TEXT”, “Read file PATH”, or “Delete file PATH”.'));
-  }
-  resultSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
-}
-
-function renderReport(task) {
-  if (!task || !task.result || ['planned', 'approval_required'].includes(task.status)) return;
-  report.hidden = false;
-  report.replaceChildren();
-  report.append(make('strong', '', `Result · ${statusLabel(task.status)}`));
-  report.append(make('p', '', task.result.summary || 'No completion summary was returned.'));
-  for (const item of task.result.evidence || []) {
-    const evidence = make('div', 'evidence-item');
-    const line = make('span');
-    const file = item.path ? `${item.path} · ` : '';
-    line.append(make('strong', '', item.verified === false ? 'UNVERIFIED' : item.error ? 'FAILED' : item.check ? 'CHECKED' : 'EVIDENCE'));
-    line.append(document.createTextNode(` ${file}${item.check || item.error || ''}`));
-    evidence.append(line);
-    if (item.content !== undefined) evidence.append(make('code', 'evidence-content', item.content));
-    report.append(evidence);
-  }
-}
-
-async function submitTask() {
-  const request = input.value.trim();
-  if (!request) { setMessage('Add a short description first.', true); input.focus(); return; }
-  planButton.disabled = true;
-  planButton.textContent = 'Planning…';
-  setMessage();
-  try {
-    const plan = await api('/api/plan', { method: 'POST', body: JSON.stringify({ request }) });
-    if (plan.status !== 'ready') {
-      const rejected = await api('/api/tasks', { method: 'POST', body: JSON.stringify({ request }) });
-      renderPlan(rejected);
-      renderReport(rejected);
-      setMessage(plan.summary, true);
-      await loadHistory();
-      return;
-    }
-    renderPlan({ plan, status: 'ready' });
-    const task = await api('/api/tasks', { method: 'POST', body: JSON.stringify({ request }) });
-    renderPlan(task, task.status === 'approval_required');
-    renderReport(task);
-    await loadHistory();
-  } catch (error) {
-    setMessage(error.message, true);
-  } finally {
-    planButton.disabled = false;
-    planButton.innerHTML = 'Make a plan <span aria-hidden="true">→</span>';
-  }
-}
-
-function renderHistory(tasks) {
-  historyList.replaceChildren();
-  if (!tasks.length) {
-    const empty = make('div', 'empty-state');
-    empty.append(make('span', '', '✳'), make('p', '', 'No tasks yet. That’s a nice clean slate.'));
-    historyList.append(empty);
-    return;
-  }
-  for (const task of tasks) {
-    const row = make('div', 'history-row');
-    row.append(make('span', 'history-icon', task.status === 'completed' ? '✓' : task.status === 'failed' ? '!' : '↗'));
-    const info = make('div');
-    info.append(make('div', 'history-request', task.request));
-    const date = new Date(task.updated_at);
-    info.append(make('div', 'history-date', Number.isNaN(date.getTime()) ? task.updated_at : date.toLocaleString()));
-    row.append(info, make('span', 'task-status', statusLabel(task.status)));
-    row.addEventListener('click', () => { renderPlan(task, task.status === 'approval_required'); renderReport(task); });
-    row.tabIndex = 0;
-    row.setAttribute('role', 'button');
-    row.setAttribute('aria-label', `Open task: ${task.request}`);
-    row.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); row.click(); } });
-    historyList.append(row);
-  }
-}
-
-async function loadHistory() {
-  try { const data = await api('/api/tasks'); renderHistory(data.tasks || []); }
-  catch (error) {
-    historyList.replaceChildren(make('div', 'empty-state', `History unavailable: ${error.message}`));
-  }
-}
-
-input.addEventListener('input', () => { count.textContent = `${input.value.length.toLocaleString()} / 12,000`; });
-input.addEventListener('keydown', event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) submitTask(); });
-planButton.addEventListener('click', submitTask);
-document.querySelector('#refresh-button').addEventListener('click', loadHistory);
-const warning = document.querySelector('#public-warning');
-if (warning && window.location.hostname.endsWith('.agent37.app')) warning.hidden = false;
-loadHistory();
+const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];let goals=[],activity=[],plan=null;
+async function api(path,options={}){const r=await fetch(path,{...options,headers:{...(options.body?{'Content-Type':'application/json'}:{}),...(options.headers||{})}});let b;try{b=await r.json()}catch{throw Error(`Unreadable server response (${r.status})`)}if(!r.ok)throw Error(b.error||`Request failed (${r.status})`);return b}
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));const nice=s=>String(s||'').replaceAll('_',' ');const date=s=>s?new Date(s).toLocaleDateString(undefined,{month:'short',day:'numeric'}):'No deadline';const time=s=>new Date(s).toLocaleString(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
+function navigate(view){$$('.view').forEach(v=>v.classList.toggle('active',v.id===`view-${view}`));$$('.nav-item[data-view]').forEach(b=>b.classList.toggle('active',b.dataset.view===view));$('#crumb').textContent=view[0].toUpperCase()+view.slice(1);if(view==='goals')drawGoals();if(view==='memory')loadMemory();if(view==='activity')loadActivity();if(view==='execution')loadExecution();if(view==='settings')loadSettings();}
+async function refresh(){try{[{goals}, {activity:act}]=await Promise.all([api('/api/goals'),api('/api/activity')]);activity=act;drawDash();if($('#view-goals').classList.contains('active'))drawGoals();drawRecent();}catch(e){toast(e.message)}}function toast(msg){let el=$('#toast');if(!el){el=document.createElement('div');el.id='toast';el.style='position:fixed;right:24px;bottom:20px;background:#34252d;color:#ffc3c9;border:1px solid #70434c;padding:12px 16px;border-radius:8px;z-index:8;font-size:12px;max-width:360px';document.body.append(el)}el.textContent=msg;el.hidden=false;clearTimeout(el.timer);el.timer=setTimeout(()=>el.hidden=true,4500)}
+function metrics(){let active=goals.filter(g=>g.status==='active'),tasks=goals.flatMap(g=>g.tasks),done=tasks.filter(t=>t.status==='completed').length,over=active.filter(g=>g.deadline&&g.deadline<new Date().toISOString().slice(0,10)&&g.progress<100).length;$('#metrics').innerHTML=`<div class="metric"><div class="metric-label">ACTIVE GOALS</div><div class="metric-value">${active.length}<small> in motion</small></div></div><div class="metric"><div class="metric-label">TASKS VERIFIED</div><div class="metric-value">${done}<small> / ${tasks.length}</small></div></div><div class="metric"><div class="metric-label">OVERALL PROGRESS</div><div class="metric-value">${tasks.length?Math.round(done*100/tasks.length):0}<small>%</small></div></div><div class="metric"><div class="metric-label">NEEDS ATTENTION</div><div class="metric-value">${over}<small> overdue goals</small></div></div>`}
+function goalCard(g,full=false){let tasks=g.tasks||[];return `<article class="goal-card ${full?'panel full-goal':''}"><div class="goal-title-row"><span class="priority ${g.priority}"></span><b class="goal-title">${esc(g.title)}</b><span class="status-pill">${esc(g.status)}</span></div>${g.description?`<p class="muted" style="margin-top:6px">${esc(g.description)}</p>`:''}<div class="goal-meta"><span>${g.completed_tasks||0} of ${g.task_count||0} tasks complete · ${date(g.deadline)}</span><span>${g.progress||0}%</span></div><div class="progress-track"><span style="width:${g.progress||0}%"></span></div><div class="goal-actions"><button class="mini-btn" data-add-task="${g.id}">＋ Task</button><button class="mini-btn" data-goal-status="${g.id}" data-status="${g.status==='paused'?'active':'paused'}">${g.status==='paused'?'Resume':'Pause'}</button><button class="mini-btn" data-edit-goal="${g.id}">Edit</button>${full?'<button class="mini-btn" data-archive="'+g.id+'">Archive</button>':''}</div>${full?`<div class="task-list">${tasks.length?tasks.map(t=>taskRow(t,g)).join(''):'<div class="empty">No tasks yet. Add the first executable step.</div>'}</div>`:''}</article>`}
+function taskRow(t,g){return `<div class="task-row"><button class="task-check ${t.status==='completed'?'done':''}" aria-label="${t.status==='completed'?'Reopen':'Complete'} ${esc(t.title)}" data-task-status="${t.id}" data-status="${t.status==='completed'?'planned':'completed'}">${t.status==='completed'?'✓':''}</button><div class="task-copy"><b>${esc(t.title)}</b><small>${esc(t.verification||'No verification criteria')} · ${t.minutes} min</small></div><span class="status-pill ${t.status}">${esc(nice(t.status))}</span></div>`}
+function drawDash(){metrics();let active=goals.filter(g=>g.status==='active');$('#dashboard-goals').innerHTML=active.length?active.slice(0,4).map(g=>goalCard(g)).join(''):'<div class="empty">No active goals yet. Create one to get moving.</div>';let tasks=active.flatMap(g=>g.tasks.map(t=>({...t,goalTitle:g.title}))).filter(t=>t.status!=='completed'&&t.status!=='cancelled').slice(0,5);$('#focus-tasks').innerHTML=tasks.length?tasks.map(t=>`<div class="task-row"><button class="task-check" aria-label="Complete ${esc(t.title)}" data-task-status="${t.id}" data-status="completed"></button><div class="task-copy"><b>${esc(t.title)}</b><small>${esc(t.goalTitle)} · ${t.minutes} min</small></div><span class="status-pill ${t.status}">${esc(nice(t.status))}</span></div>`).join(''):'<div class="empty">Your next task will show up here.</div>'}
+function drawGoals(){$('#all-goals').innerHTML=goals.length?goals.map(g=>goalCard(g,true)).join(''):'<div class="empty">Start with an outcome you care about.<br><br><button class="button primary" data-action="new-goal">＋ Create your first goal</button></div>'}
+function drawRecent(){$('#recent-activity').innerHTML=activity.length?activity.slice(0,4).map(activityRow).join(''):'<div class="empty">Your paper trail starts with your first action.</div>'}function activityRow(a){return `<div class="activity-row"><span class="activity-mark">${a.kind.includes('failed')?'!':a.kind.includes('completed')?'✓':'↗'}</span><div class="activity-copy"><b>${esc(a.message)}</b><small>${esc(nice(a.kind))}</small></div><time class="activity-time">${time(a.created_at)}</time></div>`}
+function openGoal(){const f=$('#goal-form');f.reset();$('#goal-error').textContent='';$('#goal-dialog').showModal()}async function submitGoal(e){e.preventDefault();try{let g=await api('/api/goals',{method:'POST',body:JSON.stringify({title:$('#goal-title').value,description:$('#goal-description').value,target:$('#goal-target').value||$('#goal-title').value,deadline:$('#goal-deadline').value||null,priority:$('#goal-priority').value})});$('#goal-dialog').close();await refresh();navigate('goals');toast('Goal saved. Add executable tasks to track real progress.')}catch(e){$('#goal-error').textContent=e.message}}
+function openTask(id){$('#task-goal-id').value=id;$('#task-form').reset();$('#task-error').textContent='';$('#task-dialog').showModal()}async function submitTask(e){e.preventDefault();try{await api(`/api/goals/${$('#task-goal-id').value}/tasks`,{method:'POST',body:JSON.stringify({title:$('#task-title').value,verification:$('#task-verification').value,minutes:Number($('#task-minutes').value)})});$('#task-dialog').close();await refresh();if($('#view-goals').classList.contains('active'))drawGoals()}catch(e){$('#task-error').textContent=e.message}}
+async function setTask(id,status){try{await api(`/api/tasks/${id}`,{method:'POST',body:JSON.stringify({status})});await refresh();if($('#view-execution').classList.contains('active'))loadExecution()}catch(e){toast(e.message)}}async function setGoal(id,status){try{await api(`/api/goals/${id}`,{method:'POST',body:JSON.stringify({status})});await refresh()}catch(e){toast(e.message)}}async function editGoal(id){let g=goals.find(x=>x.id===id);if(!g)return;let title=prompt('Edit goal title:',g.title);if(title===null)return;try{await api(`/api/goals/${id}`,{method:'POST',body:JSON.stringify({title})});await refresh()}catch(e){toast(e.message)}}async function archiveGoal(id){if(!confirm('Archive this goal? It will disappear from the active list.'))return;await setGoal(id,'archived')}
+let latestPlan=null;$('#planner-form').addEventListener('submit',async e=>{e.preventDefault();const title=$('#planner-goal').value.trim();if(!title){toast('Describe the outcome first.');return}try{let res=await api('/api/plan-goal',{method:'POST',body:JSON.stringify({title,available_minutes:Number($('#planner-hours').value)*60,deadline:$('#planner-deadline').value})});latestPlan=res.plan;renderPlan(latestPlan)}catch(e){toast(e.message)}});
+function renderPlan(p){let div=$('#plan-result');div.replaceChildren();let note=document.createElement('div');note.innerHTML=`<span class="kicker">${esc(p.source.toUpperCase())} · REVIEW BEFORE SAVING</span><h2 style="font-size:15px;margin:6px 0 12px">${esc(p.title)}</h2>`;div.append(note);for(let m of p.milestones){let sec=document.createElement('section');sec.className='milestone';sec.innerHTML=`<h3>${esc(m.title)}</h3>${m.tasks.map((t,i)=>`<div class="plan-task"><span>◇</span><b>${esc(t.title)}</b><small>${t.minutes}m · ${esc(t.priority)}</small><small>Proof: ${esc(t.verification)}</small></div>`).join('')}`;div.append(sec)}if(p.lessons_used?.length){let l=document.createElement('p');l.className='muted';l.textContent=`Relevant verified lessons: ${p.lessons_used.join(' · ')}`;div.append(l)}let btn=document.createElement('button');btn.className='button primary';btn.textContent='Save as a goal with tasks';btn.onclick=async()=>{try{await api('/api/plan-goal',{method:'POST',body:JSON.stringify({title:p.title,available_minutes:Number($('#planner-hours').value)*60,deadline:$('#planner-deadline').value||null,save:true})});await refresh();navigate('goals');toast('Plan saved with persisted milestone and task records.')}catch(e){toast(e.message)}};div.append(btn)}
+async function loadExecution(){try{let d=await api('/api/memory');let target=$('#execution-content');target.innerHTML='<div class="panel"><div class="panel-head"><div><span class="kicker">RECENT TOOL ACTIVITY</span><h2>Execution evidence</h2></div></div>'+ (d.attempts.length?d.attempts.map(a=>`<div class="attempt-card"><div class="attempt-head"><b>${esc(a.tool)} · attempt ${a.attempt}</b><span class="${a.verification==='verified'?'verified':'failed'}">${esc(a.verification)}</span></div><p class="muted">${esc(a.input_summary)} · exit ${esc(a.result)}</p>${a.error?`<pre>${esc(a.error)}</pre>`:''}${a.evidence.map(x=>`<pre>${esc(JSON.stringify(x,null,2))}</pre>`).join('')}</div>`).join(''):'<div class="empty">No execution attempts yet. Run the real recovery demo.</div>')+'</div>'}catch(e){toast(e.message)}}
+async function loadMemory(){try{let d=await api('/api/memory');$('#lessons').innerHTML=d.lessons.length?d.lessons.map(l=>`<div class="lesson"><button class="delete-lesson" data-delete-lesson="${l.id}">Delete</button><p>${esc(l.text)}</p><small>${l.verified?'✓ VERIFIED':'○ UNVERIFIED'} · confidence ${Math.round(l.confidence*100)}% · ${esc(l.source)} · ${time(l.created_at)}</small></div>`).join(''):'<div class="empty">No lessons yet. Verified recoveries will be saved here.</div>';$('#attempts').innerHTML=d.attempts.length?d.attempts.slice(0,8).map(a=>`<div class="attempt-list"><b>${esc(a.tool)} · ${esc(a.verification)}</b><small>${time(a.started_at)} · attempt ${a.attempt}</small></div>`).join(''):'<div class="empty">No run history yet.</div>'}catch(e){toast(e.message)}}$('#lesson-form').addEventListener('submit',async e=>{e.preventDefault();let text=$('#lesson-input').value.trim();if(!text)return;try{await api('/api/lessons',{method:'POST',body:JSON.stringify({text,source:'user',verified:false,confidence:.6})});$('#lesson-input').value='';loadMemory()}catch(e){toast(e.message)}});
+async function loadActivity(){try{let d=await api('/api/activity');activity=d.activity;$('#activity-list').innerHTML=activity.length?activity.map(activityRow).join(''):'<div class="empty">No recorded actions yet.</div>'}catch(e){toast(e.message)}}async function loadSettings(){try{let d=await api('/api/settings');$('#daily-minutes').value=d.daily_minutes;$('#working-hours').value=d.working_hours;$('#checkin-frequency').value=d.checkin_frequency;$('#settings-form').dataset.scheduler=d.scheduler}catch(e){toast(e.message)}}$('#settings-form').addEventListener('submit',async e=>{e.preventDefault();try{await api('/api/settings',{method:'POST',body:JSON.stringify({daily_minutes:Number($('#daily-minutes').value),working_hours:$('#working-hours').value,checkin_frequency:$('#checkin-frequency').value})});toast('Preferences saved locally.')}catch(e){toast(e.message)}});
+async function checkin(){try{let {checkin:c}=await api('/api/checkin',{method:'POST',body:JSON.stringify({accept:false})});$('#checkin-result').innerHTML=`<div class="checkin-box"><b>Manual check-in · ${time(c.created_at)}</b><p>${esc(c.summary)}</p><p>${esc(c.proposal.recommendation)}</p>${c.proposal.blocked_tasks.length?`<small>Blocked: ${esc(c.proposal.blocked_tasks.join(', '))}</small><br>`:''}${c.proposal.overdue_goals.length?`<small>Overdue: ${esc(c.proposal.overdue_goals.join(', '))}</small>`:''}<div style="margin-top:11px"><button class="mini-btn" id="accept-checkin">Acknowledge suggestion</button><span class="muted"> Schedule changes are not applied automatically.</span></div></div>`;$('#accept-checkin').onclick=async()=>{await api('/api/checkin',{method:'POST',body:JSON.stringify({accept:true})});toast('Suggestion acknowledged; no task or deadline was changed.');refresh()};await refresh()}catch(e){toast(e.message)}}
+async function runDemo(){let buttons=[$('#run-demo'),$('#run-demo-secondary')].filter(Boolean);buttons.forEach(b=>{b.disabled=true;b.textContent='Running bounded local test…'});try{let r=await api('/api/demo',{method:'POST',body:JSON.stringify({adaptive:true})});$('#result-title').textContent=r.status==='completed'?(r.lesson_retrieved?'Prior lesson retrieved · first attempt verified':'Failure recovered · lesson saved'):'Demo requires inspection';$('#result-output').textContent='Memory lookup: '+(r.lesson_retrieved?'Retrieved and applied a verified lesson:\n'+r.lesson_text:'No verified matching lesson found; baseline approach selected.')+'\n\nChosen strategy:\n'+r.strategy+'\n\nInitial failure evidence:\n'+(r.failure_output||'(none — previous lesson informed the first implementation)')+'\n\nRecovery action:\n'+(r.correction||'No corrective retry needed.')+'\n\nFinal verification output:\n'+(r.recovery_output||'(none)');$('#result-foot').textContent=r.summary+(r.verified?(r.lesson_retrieved?'':' Verified lesson saved for the next run.'):'');$('#result-dialog').showModal();await refresh();await loadExecution()}catch(e){toast('Demo failed: '+e.message)}finally{buttons.forEach(b=>{b.disabled=false;b.textContent='▶ Run adaptive demo'})}}$('#run-demo').onclick=runDemo;$('#run-demo-secondary').onclick=runDemo;$('#reset-adaptive-demo').onclick=async()=>{if(!confirm('Reset only the adaptive demo goal, evidence, lesson and isolated files?'))return;try{await api('/api/demo',{method:'POST',body:JSON.stringify({adaptive:true,reset:true})});await refresh();toast('Adaptive demo reset. First run will encounter the controlled failure again.')}catch(e){toast(e.message)}}; $('#result-done').onclick=()=>{$('#result-dialog').close();navigate('execution')};$('#close-result').onclick=()=>$('#result-dialog').close();$('#refresh-activity').onclick=loadActivity;$('#checkin-button').onclick=checkin;$('#top-checkin').onclick=()=>{navigate('settings');checkin()};
+document.addEventListener('click',e=>{let b=e.target.closest('[data-view]');if(b){navigate(b.dataset.view);return}if(e.target.closest('[data-action="new-goal"]'))openGoal();let x=e.target.closest('[data-add-task]');if(x)openTask(x.dataset.addTask);x=e.target.closest('[data-task-status]');if(x)setTask(x.dataset.taskStatus,x.dataset.status);x=e.target.closest('[data-goal-status]');if(x)setGoal(x.dataset.goalStatus,x.dataset.status);x=e.target.closest('[data-edit-goal]');if(x)editGoal(x.dataset.editGoal);x=e.target.closest('[data-archive]');if(x)archiveGoal(x.dataset.archive);x=e.target.closest('[data-delete-lesson]');if(x)api(`/api/lessons/${x.dataset.deleteLesson}`,{method:'POST',body:'{}'}).then(loadMemory).catch(err=>toast(err.message))});
+$('#goal-form').addEventListener('submit',submitGoal);$('#task-form').addEventListener('submit',submitTask);$('#close-dialog').onclick=()=>$('#goal-dialog').close();$('#close-task').onclick=()=>$('#task-dialog').close();$('#goal-dialog').addEventListener('click',e=>{if(e.target===$('#goal-dialog'))$('#goal-dialog').close()});$('#task-dialog').addEventListener('click',e=>{if(e.target===$('#task-dialog'))$('#task-dialog').close()});const warn=$('#public-warning');if(window.location.hostname.endsWith('.agent37.app'))warn.hidden=false;
+refresh();

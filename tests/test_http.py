@@ -4,10 +4,13 @@ import unittest
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
+import os
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from taskpilot.app import make_handler
+from taskpilot.auth import OwnerAuth
 from taskpilot.store import TaskStore
 
 
@@ -15,7 +18,11 @@ class HttpTests(unittest.TestCase):
     def setUp(self):
         self.temp = TemporaryDirectory()
         self.root = Path(self.temp.name)
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.root, TaskStore(self.root / "tasks.sqlite3")))
+        self.auth_env = patch.dict(os.environ, {"GOALFORGE_OWNER_PASSWORD":"http-test-owner-password", "GOALFORGE_SESSION_SECRET":"http-test-session-secret-0123456789abcdef", "GOALFORGE_PUBLIC_ORIGIN":"https://41d7f17c26aa56d601e9.agent37.app"})
+        self.auth_env.start()
+        self.auth = OwnerAuth(self.root / "tasks.sqlite3")
+        self.owner_token = self.auth.create_session()
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.root, TaskStore(self.root / "tasks.sqlite3"), auth=self.auth))
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.base = f"http://127.0.0.1:{self.server.server_port}"
@@ -24,23 +31,28 @@ class HttpTests(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=3)
+        self.auth_env.stop()
         self.temp.cleanup()
 
     def request(self, path, method="GET", payload=None):
         body = json.dumps(payload).encode() if payload is not None else None
-        req = Request(self.base + path, data=body, method=method, headers={"Content-Type": "application/json"})
+        headers={"Content-Type": "application/json", "Cookie":f"goalforge_session={self.owner_token}"}
+        if method != "GET":
+            headers["Origin"] = f"http://127.0.0.1:{self.server.server_port}"
+        req = Request(self.base + path, data=body, method=method, headers=headers)
         with urlopen(req) as response:
             return response.status, json.loads(response.read())
 
-    def test_public_warning_markup_is_not_forced_on_localhost(self):
+    def test_anonymous_root_serves_only_owner_login(self):
         with urlopen(self.base + "/") as response:
             page = response.read().decode()
-        self.assertIn('id="public-warning" hidden', page)
+        self.assertIn('id="login-form"', page)
+        self.assertNotIn('id="view-dashboard"', page)
 
-    def test_static_client_shows_public_warning_for_agent37_domains(self):
-        with urlopen(self.base + "/static/app.js") as response:
-            script = response.read().decode()
-        self.assertIn("window.location.hostname.endsWith('.agent37.app')", script)
+    def test_anonymous_cannot_fetch_workspace_javascript(self):
+        with self.assertRaises(HTTPError) as error:
+            urlopen(self.base + "/static/app.js")
+        self.assertEqual(error.exception.code, 404)
 
     def test_health_and_create_approval_flow(self):
         status, health = self.request("/api/health")
@@ -64,24 +76,27 @@ class HttpTests(unittest.TestCase):
 
     def test_rejects_untrusted_origins(self):
         body = json.dumps({"request": "Read file a.txt"}).encode()
-        req = Request(self.base + "/api/tasks", data=body, method="POST", headers={"Content-Type": "application/json", "Origin": "https://evil.example"})
+        req = Request(self.base + "/api/tasks", data=body, method="POST", headers={"Content-Type": "application/json", "Cookie":f"goalforge_session={self.owner_token}", "Origin": "https://evil.example"})
         with self.assertRaises(HTTPError) as ctx:
             urlopen(req)
         self.assertEqual(ctx.exception.code, 403)
 
-    def test_allows_same_origin_post_through_agent37_reverse_proxy(self):
+    def test_allows_localhost_and_rejects_host_header_as_origin_authority(self):
         body = json.dumps({"request": "Read file missing.txt"}).encode()
-        req = Request(self.base + "/api/tasks", data=body, method="POST", headers={"Content-Type": "application/json", "Origin": "https://taskpilot.example", "X-Forwarded-Host": "taskpilot.example", "X-Forwarded-Proto": "https"})
-        with urlopen(req) as response:
-            self.assertEqual(response.status, 200)
+        request = Request(self.base + "/api/tasks", data=body, method="POST", headers={"Content-Type": "application/json", "Cookie":f"goalforge_session={self.owner_token}", "Origin": self.base})
+        with urlopen(request) as response:
             payload = json.loads(response.read())
         self.assertEqual(payload["status"], "failed")
+        request = Request(self.base + "/api/tasks", data=body, method="POST", headers={"Content-Type": "application/json", "Cookie":f"goalforge_session={self.owner_token}", "Origin": "http://evil.example", "Host": "evil.example"})
+        with self.assertRaises(HTTPError) as error:
+            urlopen(request)
+        self.assertEqual(error.exception.code, 403)
 
     def test_rejects_malformed_origin_even_when_hostname_matches_proxy_host(self):
         for origin in ("https://taskpilot.example/path", "https://taskpilot.example?query", "https://user@taskpilot.example", "null", "https://taskpilot%2eexample", "https://taskpilot.example:99999"):
             with self.subTest(origin=origin):
                 body = json.dumps({"request": "Read file missing.txt"}).encode()
-                req = Request(self.base + "/api/tasks", data=body, method="POST", headers={"Content-Type": "application/json", "Origin": origin, "X-Forwarded-Host": "taskpilot.example", "X-Forwarded-Proto": "https"})
+                req = Request(self.base + "/api/tasks", data=body, method="POST", headers={"Content-Type": "application/json", "Cookie":f"goalforge_session={self.owner_token}", "Origin": origin, "X-Forwarded-Host": "taskpilot.example", "X-Forwarded-Proto": "https"})
                 with self.assertRaises(HTTPError) as ctx:
                     urlopen(req)
                 self.assertEqual(ctx.exception.code, 403)
@@ -91,19 +106,35 @@ class HttpTests(unittest.TestCase):
         for host, proto in cases:
             with self.subTest(host=host, proto=proto):
                 body = json.dumps({"request": "Read file missing.txt"}).encode()
-                req = Request(self.base + "/api/tasks", data=body, method="POST", headers={"Content-Type": "application/json", "Origin": "https://taskpilot.example", "X-Forwarded-Host": host, "X-Forwarded-Proto": proto})
+                req = Request(self.base + "/api/tasks", data=body, method="POST", headers={"Content-Type": "application/json", "Cookie":f"goalforge_session={self.owner_token}", "Origin": "https://taskpilot.example", "X-Forwarded-Host": host, "X-Forwarded-Proto": proto})
                 with self.assertRaises(HTTPError) as ctx:
                     urlopen(req)
                 self.assertEqual(ctx.exception.code, 403)
 
-    def test_approved_same_origin_creation_runs_through_proxy_headers(self):
+    def test_approved_same_origin_creation_runs_through_public_origin(self):
+        origin = "https://41d7f17c26aa56d601e9.agent37.app"
         workspace = self.root / "workspace"
         workspace.mkdir(exist_ok=True)
         (workspace / "a.txt").write_text("before")
-        _, pending = self.request("/api/tasks", "POST", {"request": "Create file a.txt with content: after"})
-        request = Request(self.base + f"/api/tasks/{pending['id']}/approve", data=json.dumps({"approve": True}).encode(), method="POST", headers={"Content-Type": "application/json", "Origin": "https://taskpilot.example", "X-Forwarded-Host": "taskpilot.example", "X-Forwarded-Proto": "https"})
-        with urlopen(request) as response:
-            result = json.loads(response.read())
+        body = json.dumps({"request": "Create file a.txt with content: after"}).encode()
+        with patch.dict(os.environ, {"GOALFORGE_PUBLIC_ORIGIN": origin}):
+            self.server.shutdown()
+            self.server.server_close()
+            self.auth_env.stop()
+            self.auth_env = patch.dict(os.environ, {"GOALFORGE_OWNER_PASSWORD":"http-test-owner-password", "GOALFORGE_SESSION_SECRET":"http-test-session-secret-0123456789abcdef", "GOALFORGE_PUBLIC_ORIGIN":origin})
+            self.auth_env.start()
+            self.auth = OwnerAuth(self.root / "tasks.sqlite3")
+            self.owner_token = self.auth.create_session()
+            self.server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.root, TaskStore(self.root / "tasks.sqlite3"), auth=self.auth))
+            self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+            self.thread.start()
+            self.base = f"http://127.0.0.1:{self.server.server_port}"
+            request = Request(self.base + "/api/tasks", data=body, method="POST", headers={"Content-Type": "application/json", "Cookie":f"goalforge_session={self.owner_token}", "Origin": self.base})
+            with urlopen(request) as response:
+                pending = json.loads(response.read())
+            request = Request(self.base + f"/api/tasks/{pending['id']}/approve", data=json.dumps({"approve": True}).encode(), method="POST", headers={"Content-Type": "application/json", "Cookie":f"goalforge_session={self.owner_token}", "Origin": origin})
+            with urlopen(request) as response:
+                result = json.loads(response.read())
         self.assertEqual(result["status"], "completed")
         self.assertEqual((workspace / "a.txt").read_text(), "after")
 
@@ -113,7 +144,7 @@ class HttpTests(unittest.TestCase):
         target = workspace / "a.txt"
         target.write_text("before")
         _, pending = self.request("/api/tasks", "POST", {"request": "Create file a.txt with content: after"})
-        request = Request(self.base + f"/api/tasks/{pending['id']}/approve", data=json.dumps({"approve": True}).encode(), method="POST", headers={"Content-Type": "application/json", "Origin": "https://evil.example", "X-Forwarded-Host": "taskpilot.example", "X-Forwarded-Proto": "https"})
+        request = Request(self.base + f"/api/tasks/{pending['id']}/approve", data=json.dumps({"approve": True}).encode(), method="POST", headers={"Content-Type": "application/json", "Cookie":f"goalforge_session={self.owner_token}", "Origin": "https://evil.example", "X-Forwarded-Host": "taskpilot.example", "X-Forwarded-Proto": "https"})
         with self.assertRaises(HTTPError) as ctx:
             urlopen(request)
         self.assertEqual(ctx.exception.code, 403)
@@ -128,7 +159,7 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(task["status"], "approval_required")
         target.unlink()
         with self.assertRaises(HTTPError) as ctx:
-            request = Request(self.base + f"/api/tasks/{task['id']}/approve", data=json.dumps({"approve": True}).encode(), method="POST", headers={"Content-Type": "application/json"})
+            request = Request(self.base + f"/api/tasks/{task['id']}/approve", data=json.dumps({"approve": True}).encode(), method="POST", headers={"Content-Type": "application/json", "Cookie":f"goalforge_session={self.owner_token}", "Origin": self.base})
             urlopen(request)
         self.assertEqual(ctx.exception.code, 409)
         self.assertFalse(target.exists())
@@ -164,7 +195,7 @@ class HttpTests(unittest.TestCase):
         ):
             with self.subTest(path=path):
                 body = json.dumps(payload).encode()
-                req = Request(self.base + path, data=body, method="POST", headers={"Content-Type": "application/json"})
+                req = Request(self.base + path, data=body, method="POST", headers={"Content-Type": "application/json", "Cookie":f"goalforge_session={self.owner_token}", "Origin": self.base})
                 with self.assertRaises(HTTPError) as ctx:
                     urlopen(req)
                 self.assertEqual(ctx.exception.code, 400)
@@ -172,11 +203,11 @@ class HttpTests(unittest.TestCase):
 
     def test_rejects_invalid_and_oversized_requests(self):
         body = json.dumps({"request": 5}).encode()
-        req = Request(self.base + "/api/tasks", data=body, method="POST", headers={"Content-Type": "application/json"})
+        req = Request(self.base + "/api/tasks", data=body, method="POST", headers={"Content-Type": "application/json", "Cookie":f"goalforge_session={self.owner_token}", "Origin": self.base})
         with self.assertRaises(HTTPError) as ctx:
             urlopen(req)
         self.assertEqual(ctx.exception.code, 400)
-        req = Request(self.base + "/api/plan", data=b"{}", method="POST", headers={"Content-Type": "text/plain"})
+        req = Request(self.base + "/api/plan", data=b"{}", method="POST", headers={"Content-Type": "text/plain", "Cookie":f"goalforge_session={self.owner_token}", "Origin": self.base})
         with self.assertRaises(HTTPError) as ctx:
             urlopen(req)
         self.assertEqual(ctx.exception.code, 400)
